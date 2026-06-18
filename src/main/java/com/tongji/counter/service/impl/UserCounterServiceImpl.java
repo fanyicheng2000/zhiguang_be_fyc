@@ -11,8 +11,6 @@ import org.springframework.data.redis.core.script.DefaultRedisScript;
 import org.springframework.stereotype.Service;
 
 import java.nio.charset.StandardCharsets;
-import java.util.ArrayList;
-import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.stream.Collectors;
@@ -29,6 +27,8 @@ import java.util.stream.Collectors;
 public class UserCounterServiceImpl implements UserCounterService {
     private final StringRedisTemplate redis;
     private final DefaultRedisScript<Long> incrScript;
+    // [方案二改造] 新增：覆写语义脚本，用于 setFollowings / setFollowers
+    private final DefaultRedisScript<Long> setFieldScript;
     private final KnowPostMapper knowPostMapper;
     private final CounterService counterService;
     private final RelationMapper relationMapper;
@@ -45,6 +45,10 @@ public class UserCounterServiceImpl implements UserCounterService {
         this.incrScript.setResultType(Long.class);
         // 用户维度计数原子折叠（1 基坐标）
         this.incrScript.setScriptText(INCR_FIELD_LUA);
+        // [方案二改造] 新增：覆写语义脚本初始化
+        this.setFieldScript = new DefaultRedisScript<>();
+        this.setFieldScript.setResultType(Long.class);
+        this.setFieldScript.setScriptText(SET_FIELD_LUA);
     }
 
     /** 增量更新关注数 */
@@ -132,6 +136,28 @@ public class UserCounterServiceImpl implements UserCounterService {
         });
     }
 
+    // [方案二改造] 新增：覆写语义 Lua 脚本：读出 SDS → 覆写指定字段 → SET 回去
+    private static final String SET_FIELD_LUA = """
+            local cntKey = KEYS[1]
+            local schemaLen = tonumber(ARGV[1])
+            local fieldSize = tonumber(ARGV[2])
+            local idx = tonumber(ARGV[3])
+            local newVal = tonumber(ARGV[4])
+            local function write32be(n)
+              local t = {}
+              for i=4,1,-1 do t[i] = n % 256; n = math.floor(n/256) end
+              return string.char(unpack(t))
+            end
+            local cnt = redis.call('GET', cntKey)
+            if not cnt then cnt = string.rep(string.char(0), schemaLen * fieldSize) end
+            local off = (idx - 1) * fieldSize
+            if newVal < 0 then newVal = 0 end
+            local seg = write32be(newVal)
+            cnt = string.sub(cnt, 1, off) .. seg .. string.sub(cnt, off+fieldSize+1)
+            redis.call('SET', cntKey, cnt)
+            return 1
+            """;
+
     private static final String INCR_FIELD_LUA = """
             
             local cntKey = KEYS[1]
@@ -160,6 +186,20 @@ public class UserCounterServiceImpl implements UserCounterService {
             redis.call('SET', cntKey, cnt)
             return 1
             """;
+
+    // [方案二改造] 新增：覆写关注数（事实重建语义，天然幂等）
+    @Override
+    public void setFollowings(long userId, long value) {
+        String key = UserCounterKeys.sdsKey(userId);
+        redis.execute(setFieldScript, List.of(key), "5", "4", "1", String.valueOf(value));
+    }
+
+    // [方案二改造] 新增：覆写粉丝数（事实重建语义，天然幂等）
+    @Override
+    public void setFollowers(long userId, long value) {
+        String key = UserCounterKeys.sdsKey(userId);
+        redis.execute(setFieldScript, List.of(key), "5", "4", "2", String.valueOf(value));
+    }
 
     private static long read32be(byte[] buf, int off) {
         if (buf == null || buf.length < off + 4) return 0L;

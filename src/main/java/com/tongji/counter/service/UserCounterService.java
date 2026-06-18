@@ -18,5 +18,11 @@ public interface UserCounterService {
     void incrementFavsReceived(long userId, int delta);
     /** 基于事实重建全部计数 */
     void rebuildAllCounters(long userId);
+
+    // [方案二改造] 覆写语义：直接设置字段值（天然幂等，代替 increment 方法）
+    /** 覆写关注数（事实重建语义） */
+    void setFollowings(long userId, long value);
+    /** 覆写粉丝数（事实重建语义） */
+    void setFollowers(long userId, long value);
 }
 

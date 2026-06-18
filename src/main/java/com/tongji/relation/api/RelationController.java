@@ -1,19 +1,19 @@
 package com.tongji.relation.api;
 
-import com.tongji.relation.service.RelationService;
 import com.tongji.auth.token.JwtService;
 import com.tongji.profile.api.dto.ProfileResponse;
+import com.tongji.relation.service.RelationService;
 import org.springframework.data.redis.core.RedisCallback;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.security.core.annotation.AuthenticationPrincipal;
 import org.springframework.security.oauth2.jwt.Jwt;
 import org.springframework.web.bind.annotation.*;
 
+import java.nio.charset.StandardCharsets;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.function.IntFunction;
-import java.nio.charset.StandardCharsets;
 
 /**
  * 关系接口控制器。

@@ -9,7 +9,8 @@ import java.time.Duration;
 
 /**
  * 关系事件处理器。
- * 职责：对 FollowCreated/FollowCanceled 事件进行去重、防抖与幂等处理，落库更新粉丝表，维护关注/粉丝 ZSet 缓存与 TTL，并原子更新用户维度计数（SDS）。
+ * 职责：对 FollowCreated/FollowCanceled 事件落库更新粉丝表，维护关注/粉丝 ZSet 缓存与 TTL，并更新用户维度计数（SDS）。
+ * [方案二改造] 所有操作均为天然幂等，无需外部去重键。
  */
 @Service
 public class RelationEventProcessor {
@@ -24,17 +25,16 @@ public class RelationEventProcessor {
     }
 
     /**
-     * 处理关系事件：入库、更新缓存、刷新计数，并进行幂等去重。
+     * 处理关系事件：入库、更新缓存、刷新计数。
+     * 所有操作均天然幂等，可安全重试。
      * @param evt 关系事件
      */
     public void process(RelationEvent evt) {
-        String dk = "dedup:rel:" + evt.type() + ":" + evt.fromUserId() + ":" + evt.toUserId() + ":" + (evt.id() == null ? "0" : String.valueOf(evt.id()));
-        Boolean first = redis.opsForValue().setIfAbsent(dk, "1", Duration.ofMinutes(10));
+        // [方案二改造] 旧：去重键门卫（所有操作已天然幂等，去重键不再必要，已注释）
+        // String dk = "dedup:rel:" + evt.type() + ":" + evt.fromUserId() + ":" + evt.toUserId() + ":" + (evt.id() == null ? "0" : String.valueOf(evt.id()));
+        // Boolean first = redis.opsForValue().setIfAbsent(dk, "1", Duration.ofMinutes(10));
+        // if (first == null || !first) { return; }
 
-        // 非首次（存在去重键）直接返回，保证消息幂等
-        if (first == null || !first) {
-            return;
-        }
         if ("FollowCreated".equals(evt.type())) {
             // 异步插入粉丝表
             mapper.insertFollower(evt.id(), evt.toUserId(), evt.fromUserId(), 1);
@@ -46,9 +46,15 @@ public class RelationEventProcessor {
             redis.expire("uf:flws:" + evt.fromUserId(), Duration.ofHours(2));
             redis.expire("uf:fans:" + evt.toUserId(), Duration.ofHours(2));
 
-            // 更新关注数与粉丝数
-            userCounterService.incrementFollowings(evt.fromUserId(), 1);
-            userCounterService.incrementFollowers(evt.toUserId(), 1);
+            // [方案二改造] 旧：增量语义（非幂等，已注释）
+            // userCounterService.incrementFollowings(evt.fromUserId(), 1);
+            // userCounterService.incrementFollowers(evt.toUserId(), 1);
+
+            // [方案二改造] 新：覆写语义——从 DB COUNT 后直接 SET，天然幂等
+            long followings = mapper.countFollowingActive(evt.fromUserId());
+            long followers  = mapper.countFollowerActive(evt.toUserId());
+            userCounterService.setFollowings(evt.fromUserId(), followings);
+            userCounterService.setFollowers(evt.toUserId(), followers);
         } else if ("FollowCanceled".equals(evt.type())) {
             mapper.cancelFollower(evt.toUserId(), evt.fromUserId());
 
@@ -58,9 +64,15 @@ public class RelationEventProcessor {
             redis.expire("uf:flws:" + evt.fromUserId(), Duration.ofHours(2));
             redis.expire("uf:fans:" + evt.toUserId(), Duration.ofHours(2));
 
-            // 更新关注数与粉丝数
-            userCounterService.incrementFollowings(evt.fromUserId(), -1);
-            userCounterService.incrementFollowers(evt.toUserId(), -1);
+            // [方案二改造] 旧：增量语义（非幂等，已注释）
+            // userCounterService.incrementFollowings(evt.fromUserId(), -1);
+            // userCounterService.incrementFollowers(evt.toUserId(), -1);
+
+            // [方案二改造] 新：覆写语义——从 DB COUNT 后直接 SET，天然幂等
+            long followings = mapper.countFollowingActive(evt.fromUserId());
+            long followers  = mapper.countFollowerActive(evt.toUserId());
+            userCounterService.setFollowings(evt.fromUserId(), followings);
+            userCounterService.setFollowers(evt.toUserId(), followers);
         }
     }
 }
