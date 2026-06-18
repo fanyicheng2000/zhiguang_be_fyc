@@ -123,16 +123,23 @@ public class RelationController {
         Map<String, Long> m = new LinkedHashMap<>();
 
         // 缺失或结构异常（少于 5 段 × 每段 4 字节）时尝试重建
+        // [修复] 引入互斥重建锁，防止并发冷启动同时打穿 DB（缓存击穿）
         if (raw == null || raw.length < 20) {
-            try {
-                userCounterService.rebuildAllCounters(userId);
-            } catch (Exception ignored) {}
-
-            // 重建后二次读取
-            raw = redis.execute((RedisCallback<byte[]>)
-                    c -> c.stringCommands().get(("ucnt:" + userId).getBytes(StandardCharsets.UTF_8)));
-
-            // 仍失败则返回 0，保证接口可用性
+            String rebuildLock = "ucnt:rebuild:" + userId;
+            Boolean got = redis.opsForValue().setIfAbsent(rebuildLock, "1", java.time.Duration.ofSeconds(5));
+            if (Boolean.TRUE.equals(got)) {
+                // 抢到锁：负责执行重建，完成后立即释放锁
+                try {
+                    userCounterService.rebuildAllCounters(userId);
+                } catch (Exception ignored) {
+                } finally {
+                    redis.delete(rebuildLock);
+                }
+                // 重建后二次读取
+                raw = redis.execute((RedisCallback<byte[]>)
+                        c -> c.stringCommands().get(("ucnt:" + userId).getBytes(StandardCharsets.UTF_8)));
+            }
+            // 未抢到锁（其他请求正在重建）或重建后仍失败：降级返回 0，保证接口可用性
             if (raw == null || raw.length < 20) {
                 m.put("followings", 0L);
                 m.put("followers", 0L);
